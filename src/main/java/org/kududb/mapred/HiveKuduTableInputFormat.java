@@ -8,8 +8,6 @@ import org.apache.hadoop.hive.kududb.KuduHandler.HiveKuduWritable;
 import org.apache.kudu.Type;
 import org.apache.hadoop.mapred.*;
 import org.apache.kudu.Schema;
-import org.apache.kudu.annotations.InterfaceAudience;
-import org.apache.kudu.annotations.InterfaceStability;
 import org.apache.kudu.client.*;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -23,7 +21,7 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.sql.Timestamp;
-import java.time.Instant;
+//import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,8 +39,6 @@ import java.util.Map;
  * the object won't be used again and the AsyncKuduClient is shut down.
  * </p>
  */
-@InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class HiveKuduTableInputFormat implements InputFormat, Configurable {
 
     private static final Log LOG = LogFactory.getLog(HiveKuduTableInputFormat.class);
@@ -101,7 +97,7 @@ public class HiveKuduTableInputFormat implements InputFormat, Configurable {
     @Override
     public InputSplit[] getSplits(JobConf jobConf, int i)
             throws IOException {
-        
+
 		if (table == null) {
 			throw new IOException("No table was provided");
 		}
@@ -201,7 +197,7 @@ public class HiveKuduTableInputFormat implements InputFormat, Configurable {
         return conf;
     }
 
-    
+
     class KuduTableRecordReader implements RecordReader<NullWritable, HiveKuduWritable> {
 
         private final NullWritable currentKey = NullWritable.get();
@@ -219,8 +215,9 @@ public class HiveKuduTableInputFormat implements InputFormat, Configurable {
 
             this.tableSplit = tableSplit;
             this.client = client;
+
             scanner = KuduScanToken.deserializeIntoScanner(tableSplit.getScanTokenSerialized(), client);
-            
+
             Schema schema = table.getSchema();
             types = new Type[schema.getColumnCount()];
             for (int i = 0; i < types.length; i++) {
@@ -286,10 +283,15 @@ public class HiveKuduTableInputFormat implements InputFormat, Configurable {
 					}
 					case UNIXTIME_MICROS: {
 						long epoch_micros_seconds = currentValue.getLong(i);
-						long epoch_seconds = epoch_micros_seconds / 1000000L;
-						long nano_seconds_adjustment = (epoch_micros_seconds % 1000000L) * 1000L;
-						Instant instant = Instant.ofEpochSecond(epoch_seconds, nano_seconds_adjustment);
-						o2.set(i, Timestamp.from(instant));
+//						long epoch_seconds = epoch_micros_seconds / 1000000L;
+//						long nano_seconds_adjustment = (epoch_micros_seconds % 1000000L) * 1000L;
+						// mark jdk 1.8
+//						Instant instant = Instant.ofEpochSecond(epoch_seconds, nano_seconds_adjustment);
+//						o2.set(i, Timestamp.from(instant));
+						if (String.valueOf(epoch_micros_seconds).length() == 10) {
+							epoch_micros_seconds = epoch_micros_seconds*1000;
+						}
+						o2.set(i, new Timestamp(epoch_micros_seconds));
 						break;
 					}
 					case BINARY: {
@@ -345,10 +347,10 @@ public class HiveKuduTableInputFormat implements InputFormat, Configurable {
 
 		/*
 		 * Mapreduce code for reference
-		 * 
+		 *
 		 * @Override public NullWritable getCurrentKey() throws IOException,
 		 * InterruptedException { return currentKey; }
-		 * 
+		 *
 		 * @Override public RowResult getCurrentValue() throws IOException,
 		 * InterruptedException { return currentValue; }
 		 */

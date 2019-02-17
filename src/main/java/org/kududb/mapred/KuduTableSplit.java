@@ -4,9 +4,11 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 
-import java.util.stream.Collectors;
+import java.util.List;
+//import java.util.stream.Collectors;
 
 import org.apache.kudu.client.KuduScanToken;
+import org.apache.kudu.client.LocatedTablet;
 
 public class KuduTableSplit implements org.apache.hadoop.mapred.InputSplit {
 
@@ -16,8 +18,15 @@ public class KuduTableSplit implements org.apache.hadoop.mapred.InputSplit {
 	public static KuduTableSplit of(KuduScanToken scanToken) throws IOException {
 		KuduTableSplit tableSplit = new KuduTableSplit();
 		tableSplit.scanTokenSerialized = scanToken.serialize();
-		tableSplit.locations = scanToken.getTablet().getReplicas().stream().map(replica -> replica.getRpcHost())
-				.collect(Collectors.toList()).toArray(new String[0]);
+		// mark jdk 1.8
+//		tableSplit.locations = scanToken.getTablet().getReplicas().stream().map(replica -> replica.getRpcHost())
+//				.collect(Collectors.toList()).toArray(new String[0]);
+		List<LocatedTablet.Replica> replicas = scanToken.getTablet().getReplicas();
+		String[] hosts = new String[replicas.size()];
+		for (int i = 0; i < replicas.size(); i++) {
+			hosts[i] = replicas.get(i).getRpcHost();
+		}
+		tableSplit.locations = hosts;
 		return tableSplit;
 	}
 

@@ -10,8 +10,6 @@ import org.apache.hadoop.mapred.RecordWriter;
 import org.apache.hadoop.mapred.Reporter;
 import org.apache.hadoop.util.Progressable;
 import org.apache.kudu.Schema;
-import org.apache.kudu.annotations.InterfaceAudience;
-import org.apache.kudu.annotations.InterfaceStability;
 import org.apache.kudu.client.*;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
@@ -27,8 +25,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 
-@InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class HiveKuduTableOutputFormat implements OutputFormat, Configurable {
 
     private static final Logger LOG = LoggerFactory.getLogger(HiveKuduTableOutputFormat.class);
