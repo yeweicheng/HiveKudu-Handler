@@ -32,11 +32,11 @@ TBLPROPERTIES(
 
 describe formatted test_drop;
 
-select count(*) from test_drop;
+select count(*) from test_drop where id = 1;
 
-select id from test_Drop where name = 'a';
+select * from test_Drop where id = 1 and name = 'a';
 
-select name, count(*) from test_drop group by name;
+select name, count(*) from test_drop where id = 1 group by name;
 
 drop table test_Drop;
 ```
