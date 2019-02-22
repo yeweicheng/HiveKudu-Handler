@@ -16,20 +16,29 @@
 
 package org.apache.hadoop.hive.kududb.KuduHandler;
 
+import com.google.common.base.Preconditions;
+import com.google.common.base.Throwables;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.metastore.HiveMetaHook;
 import org.apache.hadoop.hive.metastore.MetaStoreUtils;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.hadoop.hive.metastore.api.MetaException;
 import org.apache.hadoop.hive.metastore.api.StorageDescriptor;
 import org.apache.hadoop.hive.metastore.api.Table;
+import org.apache.hadoop.hive.ql.exec.Utilities;
+import org.apache.hadoop.hive.ql.index.IndexPredicateAnalyzer;
+import org.apache.hadoop.hive.ql.index.IndexSearchCondition;
 import org.apache.hadoop.hive.ql.metadata.DefaultStorageHandler;
 import org.apache.hadoop.hive.ql.metadata.HiveException;
 import org.apache.hadoop.hive.ql.metadata.HiveStoragePredicateHandler;
 import org.apache.hadoop.hive.ql.plan.ExprNodeDesc;
+import org.apache.hadoop.hive.ql.plan.ExprNodeGenericFuncDesc;
 import org.apache.hadoop.hive.ql.plan.TableDesc;
+import org.apache.hadoop.hive.ql.plan.TableScanDesc;
 import org.apache.hadoop.hive.ql.security.authorization.DefaultHiveAuthorizationProvider;
 import org.apache.hadoop.hive.ql.security.authorization.HiveAuthorizationProvider;
 import org.apache.hadoop.hive.serde2.Deserializer;
@@ -38,6 +47,7 @@ import org.apache.hadoop.hive.serde2.AbstractSerDe;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.InputFormat;
 import org.apache.hadoop.mapred.OutputFormat;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.kudu.ColumnSchema;
 import org.apache.kudu.Schema;
 import org.apache.kudu.client.KuduClient;
@@ -48,6 +58,8 @@ import org.kududb.mapred.HiveKuduTableInputFormat;
 import org.kududb.mapred.HiveKuduTableOutputFormat;
 
 import java.io.IOException;
+import java.net.URL;
+import java.net.URLDecoder;
 import java.util.*;
 
 /**
@@ -78,15 +90,6 @@ public class KuduStorageHandler extends DefaultStorageHandler
     @Override
     public Class<? extends AbstractSerDe> getSerDeClass() {
         return HiveKuduSerDe.class;
-    }
-
-    private KuduClient getKuduClient(String master) throws MetaException {
-        try {
-
-            return new KuduClient.KuduClientBuilder(master).build();
-        } catch (Exception ioe){
-            throw new MetaException("Error creating Kudu Client: " + ioe);
-        }
     }
 
     public KuduStorageHandler() {
@@ -165,6 +168,8 @@ public class KuduStorageHandler extends DefaultStorageHandler
 
         conf.set(HiveKuduConstants.TABLE_NAME,
                 tblProps.getProperty(HiveKuduConstants.TABLE_NAME));
+        conf.set(HiveKuduConstants.KEY_COLUMNS,
+                tblProps.getProperty(HiveKuduConstants.KEY_COLUMNS));
         conf.set(HiveKuduConstants.MASTER_ADDRESS_NAME,
                 tblProps.getProperty(HiveKuduConstants.MASTER_ADDRESS_NAME));
 
@@ -183,6 +188,65 @@ public class KuduStorageHandler extends DefaultStorageHandler
     }
 
     @Override
+    public void configureJobConf(TableDesc tableDesc, JobConf jobConf) {
+        try {
+            Class<?>[] classes = {
+            };
+
+            FileSystem localFs = FileSystem.getLocal(jobConf);
+            Set<String> jars = new HashSet<>(jobConf.getStringCollection("tmpjars"));
+            LOG.warn("tmpjars are " + jobConf.get("tmpjars"));
+            for (Class<?> clazz : classes) {
+                if (clazz == null) {
+                    continue;
+                }
+                final String path = jarFinderGetJar(clazz);
+                LOG.warn("class path " + path);
+                if (path == null) {
+                    throw new RuntimeException("Could not find jar for class " + clazz + " in order to ship it to the cluster.");
+                }
+                if (!localFs.exists(new Path(path))) {
+                    throw new RuntimeException("Could not validate jar file " + path + " for class " + clazz);
+                }
+                jars.add(path);
+            }
+            LOG.warn("jars size " + jars.size());
+            if (jars.isEmpty()) {
+                return;
+            }
+            //noinspection ToArrayCallWithZeroLengthArrayArgument
+            jobConf.set("tmpjars", StringUtils.arrayToString(jars.toArray(new String[jars.size()])));
+        } catch (Exception e) {
+            Throwables.propagate(e);
+        }
+    }
+
+    public static String jarFinderGetJar(Class klass) {
+        Preconditions.checkNotNull(klass, "klass");
+        ClassLoader loader = klass.getClassLoader();
+        if (loader != null) {
+            String class_file = klass.getName().replaceAll("\\.", "/") + ".class";
+            try {
+                for (Enumeration itr = loader.getResources(class_file); itr.hasMoreElements();) {
+                    URL url = (URL) itr.nextElement();
+                    String path = url.getPath();
+                    if (path.startsWith("file:")) {
+                        path = path.substring("file:".length());
+                    }
+                    path = URLDecoder.decode(path, "UTF-8");
+                    if ("jar".equals(url.getProtocol())) {
+                        path = URLDecoder.decode(path, "UTF-8");
+                        return path.replaceAll("!.*$", "");
+                    }
+                }
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        return null;
+    }
+
+    @Override
     public HiveAuthorizationProvider getAuthorizationProvider()
             throws HiveException {
         return new DefaultHiveAuthorizationProvider();
@@ -193,134 +257,26 @@ public class KuduStorageHandler extends DefaultStorageHandler
                                                   Deserializer deserializer, ExprNodeDesc predicate) {
         // TODO: Implement push down to Kudu here.
         DecomposedPredicate decomposedPredicate = new DecomposedPredicate();
+        IndexPredicateAnalyzer analyzer =
+                HiveKuduTableInputFormat.newIndexPredicateAnalyzer(jobConf.get(HiveKuduConstants.KEY_COLUMNS).split(","));
+        List<IndexSearchCondition> conditions = new ArrayList<IndexSearchCondition>();
+        ExprNodeGenericFuncDesc residualPredicate =
+                (ExprNodeGenericFuncDesc)analyzer.analyzePredicate(predicate, conditions);
+        decomposedPredicate.pushedPredicate = analyzer.translateSearchConditions(conditions);
+        decomposedPredicate.residualPredicate = residualPredicate;
+
+
+        LOG.warn("handler push filter: " + decomposedPredicate.pushedPredicate.getExprString());
+//        decomposedPredicate.pushedPredicate = (ExprNodeGenericFuncDesc) predicate;
+//        decomposedPredicate.residualPredicate = null;
+
         return decomposedPredicate;
     }
 
-    private String getKuduTableName(Table tbl) {
-        // mark jdk 1.8
-//        String tableName = tbl.getParameters().getOrDefault(HiveKuduConstants.TABLE_NAME,
-//        		conf.get(HiveKuduConstants.TABLE_NAME));
-        String tableName = tbl.getParameters().get(HiveKuduConstants.TABLE_NAME);
-        if (tableName == null) {
-            LOG.warn("Kudu Table name was not provided in table properties.");
-            LOG.warn("Attempting to use Hive Table name");
-            tableName = tbl.getTableName().replaceAll(".*\\.", "");
-            LOG.warn("Kudu Table name will be: " + tableName);
-
-        }
-        return tableName;
-    }
-
-    private void printSchema(Schema schema) {
-        if (schema == null) {
-              return;
-            }
-
-        LOG.debug("Printing schema for Kudu table..");
-        for (ColumnSchema sch : schema.getColumns()) {
-            LOG.debug("Column Name: " + sch.getName()
-                    + " [" + sch.getType().getName() + "]"
-                    + " key column: [" + sch.isKey() + "]"
-              );
-        }
-    }
-
-
-    /**
-     * 不需要预建kudu表
-     * @param tbl
-     * @throws MetaException
-     */
     @Override
     public void preCreateTable(Table tbl)
             throws MetaException {
-//        KuduClient client = getKuduClient(tbl.getParameters().get(HiveKuduConstants.MASTER_ADDRESS_NAME));
-//
-//        String tablename = getKuduTableName(tbl);
-//        boolean isExternal = MetaStoreUtils.isExternalTable(tbl);
-//
-//        if (isExternal) {
-//        	try {
-//	            //TODO: Check if Kudu table exists to allow external table.
-//	            //TODO: Check if column and types are compatible with existing Kudu table.
-//	            KuduTable kuduTable = client.openTable(tablename);
-//	            List<ColumnSchema> kuduColumns = kuduTable.getSchema().getColumns();
-//	            StorageDescriptor sd = tbl.getSd();
-//	            List<FieldSchema> hiveCols = new ArrayList<FieldSchema>(kuduColumns.size());
-//	            for(ColumnSchema kuduCol:kuduColumns) {
-//	            	FieldSchema hiveFieldSchema = new FieldSchema(kuduCol.getName(),
-//	            			HiveKuduBridgeUtils.kuduTypeToHiveType(kuduCol.getType()),
-//	            			null);
-//	            	hiveCols.add(hiveFieldSchema);
-//	            }
-//	            sd.setCols(hiveCols);
-//	            return;
-//        	}
-//        	catch(SerDeException e) {
-//        		throw new MetaException("unable to convet kudu schema to hive schema "+e.getMessage());
-//        	}
-//        	catch(KuduException e) {
-//        		throw new MetaException("unable to open Kudu table "+tablename+". "+ e.getMessage());
-//        	}
-//        }
-//
-//
-//        // For internal tables
-//        if (tbl.getSd().getLocation() != null) {
-//            throw new MetaException("LOCATION may not be specified for Kudu");
-//        }
-//
-//
-//        try {
-//            List<String> keyColumns = Arrays.asList(tbl.getParameters().get(HiveKuduConstants.KEY_COLUMNS).split("\\s*,\\s*"));
-//            String partitionType = tbl.getParameters().get(HiveKuduConstants.PARTITION_TYPE);
-//            if(!partitionType.equals("HASH")) { // Currently only hash partition is supported
-//            	throw new MetaException("unsupported partition type "+ partitionType);
-//            }
-//            int numPartitions = Integer.parseInt(tbl.getParameters().get(HiveKuduConstants.NUM_PARTITION));
-//            List<String> partitionColumns = Arrays.asList(tbl.getParameters().get(HiveKuduConstants.PARTITION_COLUMNS).split("\\s*,\\s*"));
-//            // mark jdk 1.8
-////            int replicationFactor = Integer.parseInt(tbl.getParameters().getOrDefault(HiveKuduConstants.REPLICATION_FACTOR, "3"));
-//            String replication = tbl.getParameters().get(HiveKuduConstants.REPLICATION_FACTOR);
-//            int replicationFactor = Integer.parseInt(replication == null ? "3" : replication);
-//
-//            List<FieldSchema> tabColumns = tbl.getSd().getCols();
-//
-//            int numberOfCols = tabColumns.size();
-//            List<ColumnSchema> columns = new ArrayList<>(numberOfCols);
-//
-//            for (FieldSchema fields : tabColumns) {
-//
-//                ColumnSchema columnSchema = new ColumnSchema
-//                        .ColumnSchemaBuilder(fields.getName(), HiveKuduBridgeUtils.hiveTypeToKuduType(fields.getType()))
-//                        .key(keyColumns.contains(fields.getName()))
-//                        .nullable(!keyColumns.contains(fields.getName()))
-//                        .build();
-//
-//                columns.add(columnSchema);
-//            }
-//
-//            Schema schema = new Schema(columns);
-//
-//            printSchema(schema);
-//
-//            CreateTableOptions createTableOptions = new CreateTableOptions();
-//            if(partitionType.toUpperCase().equals("HASH")) {  // Only hash partition is supported for now
-//            	createTableOptions.addHashPartitions(partitionColumns, numPartitions);
-//            }
-//            createTableOptions.setNumReplicas(replicationFactor);
-//
-//            client.createTable(tablename, schema, createTableOptions);
-//
-//        } catch (Exception se) {
-//            throw new MetaException("Error creating Kudu table: " + tablename + ":" + se);
-//        } finally {
-//            try {
-//                client.shutdown();
-//            } catch (Exception e) {
-//                e.printStackTrace();
-//            }
-//        }
+        // Nothing to do
     }
 
     @Override
@@ -334,51 +290,15 @@ public class KuduStorageHandler extends DefaultStorageHandler
 
     }
 
-    /**
-     * 不需要删除表
-     * @param tbl
-     * @param deleteData
-     * @throws MetaException
-     */
     @Override
     public void commitDropTable(Table tbl, boolean deleteData)
             throws MetaException {
-//        KuduClient client = getKuduClient(tbl.getParameters().get(HiveKuduConstants.MASTER_ADDRESS_NAME));
-//        String tablename = getKuduTableName(tbl);
-//        boolean isExternal = MetaStoreUtils.isExternalTable(tbl);
-//        try {
-//            if (deleteData && !isExternal) {
-//                client.deleteTable(tablename);
-//            }
-//        } catch (Exception ioe) {
-//            throw new MetaException("Error dropping table:" +tablename);
-//        } finally {
-//            try {
-//                client.shutdown();
-//            } catch (Exception e) {
-//                e.printStackTrace();
-//            }
-//        }
+        // Nothing to do
     }
 
     @Override
     public void rollbackCreateTable(Table tbl) throws MetaException {
-//        KuduClient client = getKuduClient(tbl.getParameters().get(HiveKuduConstants.MASTER_ADDRESS_NAME));
-//        String tablename = getKuduTableName(tbl);
-//        boolean isExternal = MetaStoreUtils.isExternalTable(tbl);
-//        try {
-//            if ( client.tableExists(tablename) && !isExternal) {
-//                client.deleteTable(tablename);
-//            }
-//        } catch (Exception ioe) {
-//            throw new MetaException("Error dropping table while rollback of create table:" +tablename);
-//        } finally {
-//            try {
-//                client.shutdown();
-//            } catch (Exception e) {
-//                e.printStackTrace();
-//            }
-//        }
+        // Nothing to do
     }
 
     @Override

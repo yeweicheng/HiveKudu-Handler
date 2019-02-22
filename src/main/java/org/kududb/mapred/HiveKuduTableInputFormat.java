@@ -3,8 +3,20 @@ package org.kududb.mapred;
 /**
  * Created by bimal on 4/13/16.
  */
+import org.apache.commons.lang3.StringUtils;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.kududb.KuduHandler.HiveKuduWritable;
 
+import org.apache.hadoop.hive.ql.exec.Utilities;
+import org.apache.hadoop.hive.ql.index.IndexPredicateAnalyzer;
+import org.apache.hadoop.hive.ql.index.IndexSearchCondition;
+import org.apache.hadoop.hive.ql.plan.ExprNodeDesc;
+import org.apache.hadoop.hive.ql.plan.ExprNodeGenericFuncDesc;
+import org.apache.hadoop.hive.ql.plan.TableScanDesc;
+import org.apache.hadoop.hive.serde2.ColumnProjectionUtils;
+import org.apache.hadoop.hive.shims.ShimLoader;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.kudu.ColumnSchema;
 import org.apache.kudu.Type;
 import org.apache.hadoop.mapred.*;
 import org.apache.kudu.Schema;
@@ -22,9 +34,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.sql.Timestamp;
 //import java.time.Instant;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * <p>
@@ -35,11 +45,10 @@ import java.util.Map;
  * <p>
  * Hadoop doesn't have the concept of "closing" the input format so in order to release the
  * resources we assume that once either {@link #getSplits(org.apache.hadoop.mapred.JobConf, int)}
- * or {@link HiveKuduTableInputFormat.KuduTableRecordReader#close()} have been called that
  * the object won't be used again and the AsyncKuduClient is shut down.
  * </p>
  */
-public class HiveKuduTableInputFormat implements InputFormat, Configurable {
+public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveKuduWritable> {
 
     private static final Log LOG = LogFactory.getLog(HiveKuduTableInputFormat.class);
 
@@ -64,6 +73,8 @@ public class HiveKuduTableInputFormat implements InputFormat, Configurable {
     static final String ENCODED_COLUMN_RANGE_PREDICATES_KEY =
             "kudu.mapreduce.encoded.column.range.predicates";
 
+	static final String HIVE_QUERY_STRING = "hive.query.string";
+
     /**
      * Job parameter that specifies the column projection as a comma-separated list of column names.
      *
@@ -80,6 +91,8 @@ public class HiveKuduTableInputFormat implements InputFormat, Configurable {
      */
     private final Map<String, String> reverseDNSCacheMap = new HashMap<String, String>();
 
+	private static final Object kuduTableMonitor = new Object();
+
     private Configuration conf;
     private KuduClient client;
     private KuduTable table;
@@ -94,18 +107,71 @@ public class HiveKuduTableInputFormat implements InputFormat, Configurable {
                 .build();
     }
 
+    private void initParam(JobConf jobConf) {
+		if (table == null) {
+			String tableName = jobConf.get(INPUT_TABLE_KEY);
+			this.kuduMasterAddress = jobConf.get(MASTER_ADDRESSES_KEY);
+			this.operationTimeoutMs = jobConf.getLong(OPERATION_TIMEOUT_MS_KEY,
+					AsyncKuduClient.DEFAULT_OPERATION_TIMEOUT_MS);
+			this.nameServer = jobConf.get(NAME_SERVER_KEY);
+			this.cacheBlocks = jobConf.getBoolean(SCAN_CACHE_BLOCKS, false);
+
+			LOG.warn(" the master address here is " + this.kuduMasterAddress);
+
+			this.client = this.makeKuduClient();
+			try {
+				this.table = client.openTable(tableName);
+			} catch (Exception ex) {
+				throw new RuntimeException("Could not obtain the table from the master, " +
+						"is the master running and is this table created? tablename=" + tableName + " and " +
+						"master address= " + this.kuduMasterAddress, ex);
+			}
+		}
+	}
+
     @Override
     public InputSplit[] getSplits(JobConf jobConf, int i)
             throws IOException {
+		synchronized (kuduTableMonitor) {
+			return getSplitsInternal(jobConf, i);
+		}
+	}
 
+	public InputSplit[] getSplitsInternal(JobConf jobConf, int i)
+			throws IOException {
+		initParam(jobConf);
 		if (table == null) {
 			throw new IOException("No table was provided");
 		}
 
-		List<KuduScanToken> tokens = this.client.newScanTokenBuilder(table).build();
+		String columns = jobConf.get(ColumnProjectionUtils.READ_COLUMN_NAMES_CONF_STR);
+		String exprStr = jobConf.get(TableScanDesc.FILTER_EXPR_CONF_STR);
+
+		LOG.warn("input format get filter: " + exprStr);
+
+		if (StringUtils.isBlank(exprStr)) {
+			throw new IOException("where condition must be define");
+		}
+
+		ExprNodeGenericFuncDesc filterExpr = Utilities.deserializeExpression(exprStr);
+		List<IndexSearchCondition> conditions = new ArrayList<IndexSearchCondition>();
+		IndexPredicateAnalyzer analyzer =
+				HiveKuduTableInputFormat.newIndexPredicateAnalyzer(table.getSchema().getColumns());
+		ExprNodeDesc residualPredicate = analyzer.analyzePredicate(filterExpr, conditions);
+
+		if (residualPredicate != null) {
+			LOG.warn("Ignoring residual predicate " + residualPredicate.getExprString());
+		}
+
+		List<KuduScanToken> tokens = new KuduPredicateBuilder().toPredicateScan(this.client.newScanTokenBuilder(table),
+				table, conditions);
+
+		Path[] tablePaths = FileInputFormat.getInputPaths(jobConf);
+
 		KuduTableSplit[] splits = new KuduTableSplit[tokens.size()];
-		for (int j = 0; j < tokens.size(); ++j)
-			splits[j] = KuduTableSplit.of(tokens.get(j));
+		for (int j = 0; j < tokens.size(); ++j) {
+			splits[j] = new KuduTableSplit(tokens.get(j), tablePaths[0]);
+		}
 		return splits;
 	}
 
@@ -138,19 +204,21 @@ public class HiveKuduTableInputFormat implements InputFormat, Configurable {
         }
         return location;
     }
+
 	@Override
 	public RecordReader<NullWritable, HiveKuduWritable> getRecordReader(InputSplit inputSplit, final JobConf jobConf,
 			final Reporter reporter) throws IOException {
 		KuduTableSplit tableSplit = (KuduTableSplit) inputSplit;
 		LOG.warn("I was called : getRecordReader");
 		try {
-			return new KuduTableRecordReader(tableSplit, this.makeKuduClient());
-		} catch (InterruptedException e) {
+			initParam(jobConf);
+			return new KuduTableRecordReader(tableSplit, this.makeKuduClient(), this.table);
+		} catch (Exception e) {
 			throw new IOException(e);
 		}
 	}
 
-    @Override
+//    @Override
     public void setConf(Configuration entries) {
     	LOG.warn("I was called : setConf");
         this.conf = new Configuration(entries);
@@ -192,187 +260,50 @@ public class HiveKuduTableInputFormat implements InputFormat, Configurable {
         return r;
     }
 
-    @Override
+//    @Override
     public Configuration getConf() {
         return conf;
     }
 
+	/**
+	 * kudu analyzer
+	 * @param columnSchemaList
+	 * @return
+	 */
+	public static IndexPredicateAnalyzer newIndexPredicateAnalyzer(List<ColumnSchema> columnSchemaList) {
 
-    class KuduTableRecordReader implements RecordReader<NullWritable, HiveKuduWritable> {
+		IndexPredicateAnalyzer analyzer = new IndexPredicateAnalyzer();
 
-        private final NullWritable currentKey = NullWritable.get();
-        private RowResult currentValue;
-        private RowResultIterator iterator;
-        private KuduScanner scanner;
-        private KuduTableSplit tableSplit;
-        private Type[] types;
-        private KuduClient client;
-        private boolean first = true;
-        private long rowCount;
-
-        public KuduTableRecordReader(KuduTableSplit tableSplit, KuduClient client) throws IOException, InterruptedException {
-            LOG.warn("I was called : TableRecordReader");
-
-            this.tableSplit = tableSplit;
-            this.client = client;
-
-            scanner = KuduScanToken.deserializeIntoScanner(tableSplit.getScanTokenSerialized(), client);
-
-            Schema schema = table.getSchema();
-            types = new Type[schema.getColumnCount()];
-            for (int i = 0; i < types.length; i++) {
-                types[i] = schema.getColumnByIndex(i).getType();
-                LOG.warn("Setting types array " + i + " to " + types[i].name());
-            }
-            // Calling this now to set iterator.
-            tryRefreshIterator();
-            rowCount = 0L;
-        }
-
-        @Override
-        public boolean next(NullWritable o, HiveKuduWritable o2) throws IOException {
-            LOG.warn("I was called : next");
-
-			if (!iterator.hasNext()) {
-				tryRefreshIterator();
-				if (!iterator.hasNext()) {
-					// Means we still have the same iterator, we're done
-					return false;
-				}
-			}
-
-			currentValue = iterator.next();
-			o = currentKey;
-			o2.clear();
-			for (int i = 0; i < types.length; i++) {
-				if (currentValue.isNull(i))
-					o2.set(i, null);
-				else {
-					switch (types[i]) {
-					case STRING: {
-						o2.set(i, currentValue.getString(i));
-						break;
-					}
-					case FLOAT: {
-						o2.set(i, currentValue.getFloat(i));
-						break;
-					}
-					case DOUBLE: {
-						o2.set(i, currentValue.getDouble(i));
-						break;
-					}
-					case BOOL: {
-						o2.set(i, currentValue.getBoolean(i));
-						break;
-					}
-					case INT8: {
-						o2.set(i, currentValue.getByte(i));
-						break;
-					}
-					case INT16: {
-						o2.set(i, currentValue.getShort(i));
-						break;
-					}
-					case INT32: {
-						o2.set(i, currentValue.getInt(i));
-						break;
-					}
-					case INT64: {
-						o2.set(i, currentValue.getLong(i));
-						break;
-					}
-					case UNIXTIME_MICROS: {
-						long epoch_micros_seconds = currentValue.getLong(i);
-//						long epoch_seconds = epoch_micros_seconds / 1000000L;
-//						long nano_seconds_adjustment = (epoch_micros_seconds % 1000000L) * 1000L;
-						// mark jdk 1.8
-//						Instant instant = Instant.ofEpochSecond(epoch_seconds, nano_seconds_adjustment);
-//						o2.set(i, Timestamp.from(instant));
-						if (String.valueOf(epoch_micros_seconds).length() == 10) {
-							epoch_micros_seconds = epoch_micros_seconds*1000;
-						}
-						o2.set(i, new Timestamp(epoch_micros_seconds));
-						break;
-					}
-					case BINARY: {
-						o2.set(i, currentValue.getBinaryCopy(i));
-						break;
-					}
-					default:
-						throw new IOException("Cannot write Object '" + currentValue.getColumnType(i).name()
-								+ "' as type: " + types[i].name());
-					}
-				}
-				LOG.warn("Value returned " + o2.get(i));
-			}
-			this.rowCount += 1L;
-			return true;
-		}
-
-		@Override
-		public NullWritable createKey() {
-			LOG.warn("I was called : createKey");
-			return NullWritable.get();
-		}
-
-        @Override
-        public HiveKuduWritable createValue() {
-            LOG.warn("I was called : createValue");
-            return new HiveKuduWritable(types);
-        }
-
-        @Override
-        public long getPos() throws IOException {
-            LOG.warn("I was called : getPos");
-            return this.rowCount;
-            //TODO: Get progress
-        }
-
-        /**
-         * If the scanner has more rows, get a new iterator else don't do anything.
-         * @throws IOException
-         */
-        private void tryRefreshIterator() throws IOException {
-			LOG.warn("I was called : tryRefreshIterator");
-			if (!scanner.hasMoreRows()) {
-				this.close();
-				return;
-			}
-			try {
-				iterator = scanner.nextRows();
-			} catch (Exception e) {
-				throw new IOException("Couldn't get scan data", e);
+		ColumnSchema columnSchema;
+		for (int i = 0; i < columnSchemaList.size(); i++) {
+			columnSchema = columnSchemaList.get(i);
+			if (columnSchema.isKey()) {
+				analyzer.addComparisonOp(columnSchema.getName(),
+						"org.apache.hadoop.hive.ql.udf.generic.GenericUDFOPEqual",
+						"org.apache.hadoop.hive.ql.udf.generic.GenericUDFOPEqualOrGreaterThan",
+						"org.apache.hadoop.hive.ql.udf.generic.GenericUDFOPEqualOrLessThan",
+						"org.apache.hadoop.hive.ql.udf.generic.GenericUDFOPLessThan",
+						"org.apache.hadoop.hive.ql.udf.generic.GenericUDFOPGreaterThan");
 			}
 		}
 
-		/*
-		 * Mapreduce code for reference
-		 *
-		 * @Override public NullWritable getCurrentKey() throws IOException,
-		 * InterruptedException { return currentKey; }
-		 *
-		 * @Override public RowResult getCurrentValue() throws IOException,
-		 * InterruptedException { return currentValue; }
-		 */
-
-		@Override
-		public float getProgress() throws IOException {
-			LOG.warn("I was called : getProgress");
-			// TODO Guesstimate progress
-			return 0;
-		}
-
-		@Override
-		public void close() throws IOException {
-			LOG.warn("I was called : close");
-			try {
-				scanner.close();
-			} catch (NullPointerException npe) {
-				LOG.warn("The scanner is supposed to be open but its not. TODO: Fix me.");
-			} catch (Exception e) {
-				throw new IOException(e);
-			}
-//            this.client.close();
-		}
+		return analyzer;
 	}
+
+	public static IndexPredicateAnalyzer newIndexPredicateAnalyzer(String[] keyColumns) {
+
+		IndexPredicateAnalyzer analyzer = new IndexPredicateAnalyzer();
+
+		for (int i = 0; i < keyColumns.length; i++) {
+			analyzer.addComparisonOp(keyColumns[i],
+					"org.apache.hadoop.hive.ql.udf.generic.GenericUDFOPEqual",
+					"org.apache.hadoop.hive.ql.udf.generic.GenericUDFOPEqualOrGreaterThan",
+					"org.apache.hadoop.hive.ql.udf.generic.GenericUDFOPEqualOrLessThan",
+					"org.apache.hadoop.hive.ql.udf.generic.GenericUDFOPLessThan",
+					"org.apache.hadoop.hive.ql.udf.generic.GenericUDFOPGreaterThan");
+		}
+
+		return analyzer;
+	}
+
 }

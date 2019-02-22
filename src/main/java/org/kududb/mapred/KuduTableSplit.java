@@ -7,17 +7,33 @@ import java.io.IOException;
 import java.util.List;
 //import java.util.stream.Collectors;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.mapred.FileInputFormat;
+import org.apache.hadoop.mapred.FileSplit;
+import org.apache.hadoop.mapred.InputSplit;
 import org.apache.kudu.client.KuduScanToken;
 import org.apache.kudu.client.LocatedTablet;
 
-public class KuduTableSplit implements org.apache.hadoop.mapred.InputSplit {
+public class KuduTableSplit extends FileSplit implements InputSplit {
+
+	private static final Log LOG = LogFactory.getLog(KuduTableSplit.class);
 
 	private byte[] scanTokenSerialized;
 	private String[] locations;
 
-	public static KuduTableSplit of(KuduScanToken scanToken) throws IOException {
-		KuduTableSplit tableSplit = new KuduTableSplit();
-		tableSplit.scanTokenSerialized = scanToken.serialize();
+	/**
+	 * For Writable
+	 */
+	public KuduTableSplit() {
+		super(null, 0, 0, (String[]) null);
+	}
+
+	public KuduTableSplit(KuduScanToken scanToken, Path dummyPath) throws IOException {
+		super(dummyPath, 0, 0, (String[]) null);
+		LOG.warn("split fs path: " + super.toString());
+		scanTokenSerialized = scanToken.serialize();
 		// mark jdk 1.8
 //		tableSplit.locations = scanToken.getTablet().getReplicas().stream().map(replica -> replica.getRpcHost())
 //				.collect(Collectors.toList()).toArray(new String[0]);
@@ -26,12 +42,13 @@ public class KuduTableSplit implements org.apache.hadoop.mapred.InputSplit {
 		for (int i = 0; i < replicas.size(); i++) {
 			hosts[i] = replicas.get(i).getRpcHost();
 		}
-		tableSplit.locations = hosts;
-		return tableSplit;
+		locations = hosts;
 	}
 
 	@Override
 	public void write(DataOutput out) throws IOException {
+		super.write(out);
+		LOG.warn("split write fs path: " + super.toString());
 		// Write scanTokenSerialized
 		out.writeInt(this.scanTokenSerialized.length);
 		out.write(this.scanTokenSerialized);
@@ -43,6 +60,8 @@ public class KuduTableSplit implements org.apache.hadoop.mapred.InputSplit {
 
 	@Override
 	public void readFields(DataInput in) throws IOException {
+		super.readFields(in);
+		LOG.warn("split readFields fs path: " + super.toString());
 		// read scanTokenSerialized
 		int byteArrayLength = in.readInt();
 		this.scanTokenSerialized = new byte[byteArrayLength];
@@ -55,7 +74,7 @@ public class KuduTableSplit implements org.apache.hadoop.mapred.InputSplit {
 	}
 
 	@Override
-	public long getLength() throws IOException {
+	public long getLength() {
 		// TODO Auto-generated method stub
 		return 0;
 	}

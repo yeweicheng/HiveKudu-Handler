@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-
+@SuppressWarnings({ "deprecation", "rawtypes" })
 public class HiveKuduTableOutputFormat implements OutputFormat, Configurable {
 
     private static final Logger LOG = LoggerFactory.getLogger(HiveKuduTableOutputFormat.class);
