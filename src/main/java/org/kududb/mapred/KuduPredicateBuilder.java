@@ -27,7 +27,7 @@ public class KuduPredicateBuilder {
                                                List<IndexSearchCondition> conditions) throws IOException {
 
         if (conditions == null || conditions.isEmpty()) {
-            throw new IOException("unsupported conditions, only can use =,>=,>,<=,<");
+            throw new IOException("unsupported conditions, kudu key condition must be defined and only can use =,>=,>,<=,<");
         }
 
         Map<String, ColumnSchema> columnMap = new HashMap<>();

@@ -150,7 +150,7 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 		LOG.warn("input format get filter: " + exprStr);
 
 		if (StringUtils.isBlank(exprStr)) {
-			throw new IOException("where condition must be define");
+			throw new IOException("kudu key condition must be defined");
 		}
 
 		ExprNodeGenericFuncDesc filterExpr = Utilities.deserializeExpression(exprStr);

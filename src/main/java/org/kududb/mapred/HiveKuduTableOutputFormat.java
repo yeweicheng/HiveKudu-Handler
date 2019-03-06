@@ -3,12 +3,14 @@ package org.kududb.mapred;
 /**
  * Created by bimal on 4/13/16.
  */
+import org.apache.hadoop.hive.kududb.KuduHandler.HiveKuduConstants;
 import org.apache.hadoop.hive.kududb.KuduHandler.HiveKuduWritable;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.RecordWriter;
 import org.apache.hadoop.mapred.Reporter;
 import org.apache.hadoop.util.Progressable;
+import org.apache.kudu.ColumnSchema;
 import org.apache.kudu.Schema;
 import org.apache.kudu.client.*;
 import org.apache.hadoop.conf.Configurable;
@@ -29,14 +31,10 @@ public class HiveKuduTableOutputFormat implements OutputFormat, Configurable {
 
     private static final Logger LOG = LoggerFactory.getLogger(HiveKuduTableOutputFormat.class);
 
-    /** Job parameter that specifies the output table. */
-    static final String OUTPUT_TABLE_KEY = "kudu.mapreduce.output.table";
-
-    /** Job parameter that specifies where the masters are */
-    static final String MASTER_ADDRESSES_KEY = "kudu.mapreduce.master.addresses";
-
     /** Job parameter that specifies how long we wait for operations to complete */
     static final String OPERATION_TIMEOUT_MS_KEY = "kudu.mapreduce.operation.timeout.ms";
+
+    static final String OPERATION_IGNORE_ROW_ERROR = "kudu.mapreduce.operation.ignore.row.error";
 
     /** Number of rows that are buffered before flushing to the tablet server */
     static final String BUFFER_ROW_COUNT_KEY = "kudu.mapreduce.buffer.row.count";
@@ -61,25 +59,32 @@ public class HiveKuduTableOutputFormat implements OutputFormat, Configurable {
      */
     public enum Counters { ROWS_WITH_ERRORS }
 
+    private static final int ROW_COUNT_FLAG_TIME = 60000;
+
     private Configuration conf = null;
 
     private KuduClient client;
     private KuduTable table;
     private KuduSession session;
     private long operationTimeoutMs;
+    private boolean operationIgnoreRowError;
+    private List<ColumnSchema> columns;
+    private int columnSize;
 
     @Override
     public void setConf(Configuration entries) {
         LOG.warn("I was called : setConf");
         this.conf = new Configuration(entries);
 
-        String masterAddress = this.conf.get(MASTER_ADDRESSES_KEY);
-        String tableName = this.conf.get(OUTPUT_TABLE_KEY);
+        String masterAddress = this.conf.get(HiveKuduConstants.MASTER_ADDRESS_NAME);
+        String tableName = this.conf.get(HiveKuduConstants.TABLE_NAME);
         this.operationTimeoutMs = this.conf.getLong(OPERATION_TIMEOUT_MS_KEY,
                 AsyncKuduClient.DEFAULT_OPERATION_TIMEOUT_MS);
+        this.operationIgnoreRowError = this.conf.getBoolean(OPERATION_IGNORE_ROW_ERROR, false);
         int bufferSpace = this.conf.getInt(BUFFER_ROW_COUNT_KEY, 1000);
 
         LOG.warn(" the master address here is " + masterAddress);
+        LOG.warn(" the output table here is " + tableName);
 
         this.client = new KuduClient.KuduClientBuilder(masterAddress)
                 .defaultOperationTimeoutMs(operationTimeoutMs)
@@ -99,6 +104,10 @@ public class HiveKuduTableOutputFormat implements OutputFormat, Configurable {
         assert(MULTITON.get(multitonKey) == null);
         MULTITON.put(multitonKey, this);
         entries.set(MULTITON_KEY, multitonKey);
+
+        Schema schema = table.getSchema();
+        this.columns = schema.getColumns();
+        this.columnSize = columns.size();
     }
 
     private void shutdownClient() throws IOException {
@@ -111,18 +120,15 @@ public class HiveKuduTableOutputFormat implements OutputFormat, Configurable {
     }
 
     public static KuduTable getKuduTable(String multitonKey) {
-        LOG.warn("I was called : getKuduTable");
         return MULTITON.get(multitonKey).getKuduTable();
     }
 
     private KuduTable getKuduTable() {
-        LOG.warn("I was called : getKuduTable");
         return this.table;
     }
 
     @Override
     public Configuration getConf() {
-        LOG.warn("I was called : getConf");
         return conf;
     }
 
@@ -130,13 +136,11 @@ public class HiveKuduTableOutputFormat implements OutputFormat, Configurable {
     @Override
     public RecordWriter getRecordWriter(FileSystem fileSystem, JobConf jobConf, String s, Progressable progressable)
             throws IOException {
-        LOG.warn("I was called : getRecordWriter");
         return new TableRecordWriter(this.session);
     }
 
     @Override
     public void checkOutputSpecs(FileSystem fileSystem, JobConf jobConf) throws IOException {
-        LOG.warn("I was called : checkOutputSpecs");
         shutdownClient();
     }
 
@@ -152,20 +156,18 @@ public class HiveKuduTableOutputFormat implements OutputFormat, Configurable {
 
         private final AtomicLong rowsWithErrors = new AtomicLong();
         private final KuduSession session;
+        private long rowCount = 0;
 
         public TableRecordWriter(KuduSession session) {
-            LOG.warn("I was called : TableRecordWriter");
             this.session = session;
         }
 
         private Operation getOperation(HiveKuduWritable hiveKuduWritable)
             throws IOException{
-            LOG.warn("I was called : getOperation");
             int recCount = hiveKuduWritable.getColCount();
-            Schema schema = table.getSchema();
-            int colCount = schema.getColumnCount();
-            if (recCount != colCount) {
-                throw new IOException("Kudu table column count of " + colCount + " does not match "
+
+            if (recCount != columnSize) {
+                throw new IOException("Kudu table column count of " + columnSize + " does not match "
                         + "with Serialized object record count of " + recCount);
             }
             //TODO: Find out if the record needs to be updated or deleted.
@@ -174,69 +176,52 @@ public class HiveKuduTableOutputFormat implements OutputFormat, Configurable {
             Insert insert = table.newInsert();
             PartialRow row = insert.getRow();
 
-            for (int i = 0; i < recCount; i++) {
+            for (int i = 0; i < columnSize; i++) {
                 Object obj = hiveKuduWritable.get(i);
-                LOG.warn("From Writable Column value of " + i + " is " + obj.toString() + " and type is " + hiveKuduWritable.getType(i).name());
-                LOG.warn("From Schema Column name of " + i + " is " + schema.getColumnByIndex(i).getName());
+                if (obj == null) {
+                    row.setNull(i);
+                    continue;
+                }
+
                 switch(hiveKuduWritable.getType(i)) {
                     case STRING: {
-                        LOG.warn("I was called : STRING");
-                        String s = obj.toString();
-                        row.addString(i, s);
+                        row.addString(i, obj.toString());
                         break;
                     }
                     case FLOAT: {
-                        LOG.warn("I was called : FLOAT");
-                        Float f = (Float) obj;
-                        row.addFloat(i, f);
+                        row.addFloat(i, (Float) obj);
                         break;
                     }
                     case DOUBLE: {
-                        LOG.warn("I was called : DOUBLE");
-                        Double d = (Double) obj;
-                        row.addDouble(i, d);
+                        row.addDouble(i, (Double) obj);
                         break;
                     }
                     case BOOL: {
-                        LOG.warn("I was called : BOOL");
-                        Boolean b = (Boolean) obj;
-                        row.addBoolean(i, b);
+                        row.addBoolean(i, (Boolean) obj);
                         break;
                     }
                     case INT8: {
-                        LOG.warn("I was called : INT8");
-                        Byte b = (Byte) obj;
-                        row.addByte(i, b);
+                        row.addByte(i, (Byte) obj);
                         break;
                     }
                     case INT16: {
-                        LOG.warn("I was called : INT16");
-                        Short s = (Short) obj;
-                        row.addShort(i, s);
+                        row.addShort(i, (Short) obj);
                         break;
                     }
                     case INT32: {
-                        LOG.warn("I was called : INT32");
-                        Integer x = (Integer) obj;
-                        row.addInt(i, x);
+                        row.addInt(i, (Integer) obj);
                         break;
                     }
                     case INT64: {
-                        LOG.warn("I was called : INT64");
-                        Long l = (Long) obj;
-                        row.addLong(i, l);
+                        row.addLong(i, (Long) obj);
                         break;
                     }
                     case UNIXTIME_MICROS: {
-                        LOG.warn("I was called : TIMESTAMP");
-                        Long time = (Long) obj;
-                        row.addLong(i, time);
+                        row.addLong(i, (Long) obj);
                         break;
                     }
                     case BINARY: {
-                        LOG.warn("I was called : BINARY");
-                        byte[] b = (byte[]) obj;
-                        row.addBinary(i, b);
+                        row.addBinary(i, (byte[]) obj);
                         break;
                     }
                     default:
@@ -251,28 +236,14 @@ public class HiveKuduTableOutputFormat implements OutputFormat, Configurable {
         public void write(NullWritable key, HiveKuduWritable kw)
                 throws IOException {
             try {
-                LOG.warn("I was called : write");
+                if (System.currentTimeMillis()%ROW_COUNT_FLAG_TIME == 0) {
+                    LOG.info("current line size : " + rowCount);
+                }
+
                 Operation operation = getOperation(kw);
                 session.apply(operation);
 
-                //read from Kudu if the insert was successful
-                List<String> projectColumns = new ArrayList<>(2);
-                projectColumns.add("id");
-                projectColumns.add("name");
-                KuduScanner scanner = client.newScannerBuilder(table)
-                        .setProjectedColumnNames(projectColumns)
-                        .build();
-
-                while (scanner.hasMoreRows()) {
-                    RowResultIterator results = scanner.nextRows();
-                    while (results.hasNext()) {
-                        RowResult result = results.next();
-                        LOG.warn("Returned from kudu" + result.getInt(0) + ":" +result.getString(1));
-                    }
-                }
-
-                LOG.warn("applying operation");
-
+                rowCount++;
             } catch (Exception e) {
                 throw new IOException("Encountered an error while writing", e);
             }
@@ -281,12 +252,12 @@ public class HiveKuduTableOutputFormat implements OutputFormat, Configurable {
         @Override
         public void close(Reporter reporter) throws IOException {
             try {
-                LOG.warn("I was called : close");
+                LOG.info("all line size : " + rowCount);
                 processRowErrors(session.close());
-                shutdownClient();
             } catch (Exception e) {
                 throw new IOException("Encountered an error while closing this task", e);
             } finally {
+                shutdownClient();
                 if (reporter != null) {
                     // This is the only place where we have access to the context in the record writer,
                     // so set the counter here.
@@ -295,14 +266,23 @@ public class HiveKuduTableOutputFormat implements OutputFormat, Configurable {
             }
         }
 
-        private void processRowErrors(List<OperationResponse> responses) {
-            LOG.warn("I was called : processRowErrors");
+        private void processRowErrors(List<OperationResponse> responses) throws Exception {
             List<RowError> errors = OperationResponse.collectErrors(responses);
             if (!errors.isEmpty()) {
                 int rowErrorsCount = errors.size();
                 rowsWithErrors.addAndGet(rowErrorsCount);
-                LOG.warn("Got per errors for " + rowErrorsCount + " rows, " +
-                        "the first one being " + errors.get(0).getStatus());
+                StringBuilder sb = new StringBuilder("Got per errors for ").append(rowErrorsCount)
+                        .append(" rows, ").append("the errors(").append(errors.size()).append(") list: \n");
+                for (int i = 0; i < errors.size() && i < 10; i++) {
+                    sb.append(errors.get(i).getErrorStatus().toString()).append("\n");
+                }
+                if (errors.size() > 10) {
+                    sb.append("...... \n");
+                }
+                LOG.error(sb.toString());
+                if (!operationIgnoreRowError) {
+                    throw new IOException(sb.toString());
+                }
             }
         }
     }

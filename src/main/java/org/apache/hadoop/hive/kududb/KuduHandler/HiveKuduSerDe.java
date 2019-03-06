@@ -135,7 +135,6 @@ public class HiveKuduSerDe extends AbstractSerDe {
 
                 Object javaObject = HiveKuduBridgeUtils.deparseObject(field,
                         fieldOI);
-                LOG.warn("Column value of " + i + " is " + javaObject.toString());
                 cachedWritable.set(i, javaObject);
             }
         }
