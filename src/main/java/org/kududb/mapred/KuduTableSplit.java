@@ -22,6 +22,7 @@ public class KuduTableSplit extends FileSplit implements InputSplit {
 
 	private byte[] scanTokenSerialized;
 	private String[] locations;
+	private String columns;
 
 	/**
 	 * For Writable
@@ -30,7 +31,7 @@ public class KuduTableSplit extends FileSplit implements InputSplit {
 		super(null, 0, 0, (String[]) null);
 	}
 
-	public KuduTableSplit(KuduScanToken scanToken, Path dummyPath) throws IOException {
+	public KuduTableSplit(KuduScanToken scanToken, Path dummyPath, String columns) throws IOException {
 		super(dummyPath, 0, 0, (String[]) null);
 		LOG.warn("split fs path: " + super.toString());
 		scanTokenSerialized = scanToken.serialize();
@@ -43,12 +44,14 @@ public class KuduTableSplit extends FileSplit implements InputSplit {
 			hosts[i] = replicas.get(i).getRpcHost();
 		}
 		locations = hosts;
+		this.columns = columns;
 	}
 
 	@Override
 	public void write(DataOutput out) throws IOException {
 		super.write(out);
 		LOG.warn("split write fs path: " + super.toString());
+		out.writeUTF(this.columns);
 		// Write scanTokenSerialized
 		out.writeInt(this.scanTokenSerialized.length);
 		out.write(this.scanTokenSerialized);
@@ -62,6 +65,7 @@ public class KuduTableSplit extends FileSplit implements InputSplit {
 	public void readFields(DataInput in) throws IOException {
 		super.readFields(in);
 		LOG.warn("split readFields fs path: " + super.toString());
+		this.columns = in.readUTF();
 		// read scanTokenSerialized
 		int byteArrayLength = in.readInt();
 		this.scanTokenSerialized = new byte[byteArrayLength];
@@ -86,5 +90,9 @@ public class KuduTableSplit extends FileSplit implements InputSplit {
 
 	byte[] getScanTokenSerialized() {
 		return this.scanTokenSerialized.clone();
+	}
+
+	String getColumns() {
+		return columns;
 	}
 }

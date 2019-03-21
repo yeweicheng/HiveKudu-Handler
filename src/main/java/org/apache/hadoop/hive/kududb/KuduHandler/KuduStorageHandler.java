@@ -255,7 +255,6 @@ public class KuduStorageHandler extends DefaultStorageHandler
     @Override
     public DecomposedPredicate decomposePredicate(JobConf jobConf,
                                                   Deserializer deserializer, ExprNodeDesc predicate) {
-        // TODO: Implement push down to Kudu here.
         DecomposedPredicate decomposedPredicate = new DecomposedPredicate();
         IndexPredicateAnalyzer analyzer =
                 HiveKuduTableInputFormat.newIndexPredicateAnalyzer(jobConf.get(HiveKuduConstants.KEY_COLUMNS).split(","));
@@ -267,8 +266,6 @@ public class KuduStorageHandler extends DefaultStorageHandler
 
 
         LOG.warn("handler push filter: " + decomposedPredicate.pushedPredicate.getExprString());
-//        decomposedPredicate.pushedPredicate = (ExprNodeGenericFuncDesc) predicate;
-//        decomposedPredicate.residualPredicate = null;
 
         return decomposedPredicate;
     }

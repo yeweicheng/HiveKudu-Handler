@@ -11,6 +11,7 @@ import org.apache.hadoop.hive.serde2.lazy.LazyUtils;
 import org.apache.hadoop.hive.serde2.objectinspector.PrimitiveObjectInspector;
 import org.apache.hadoop.io.*;
 import org.apache.kudu.ColumnSchema;
+import org.apache.kudu.client.ColumnRangePredicate;
 import org.apache.kudu.client.KuduPredicate;
 import org.apache.kudu.client.KuduScanToken;
 import org.apache.kudu.client.KuduTable;
@@ -24,11 +25,14 @@ public class KuduPredicateBuilder {
 
     public List<KuduScanToken> toPredicateScan(KuduScanToken.KuduScanTokenBuilder builder,
                                                KuduTable table,
+                                               List<String> columnList,
                                                List<IndexSearchCondition> conditions) throws IOException {
 
         if (conditions == null || conditions.isEmpty()) {
             throw new IOException("unsupported conditions, kudu key condition must be defined and only can use =,>=,>,<=,<");
         }
+
+        builder.setProjectedColumnNames(columnList);
 
         Map<String, ColumnSchema> columnMap = new HashMap<>();
         List<ColumnSchema> columnSchemas = table.getSchema().getColumns();

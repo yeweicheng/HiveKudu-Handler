@@ -11,6 +11,8 @@ import org.apache.kudu.client.*;
 
 import java.io.IOException;
 import java.sql.Timestamp;
+import java.util.ArrayList;
+import java.util.List;
 
 public class KuduTableRecordReader implements RecordReader<NullWritable, HiveKuduWritable> {
 
@@ -35,10 +37,16 @@ public class KuduTableRecordReader implements RecordReader<NullWritable, HiveKud
 
         scanner = KuduScanToken.deserializeIntoScanner(tableSplit.getScanTokenSerialized(), client);
 
+        String[] colArr = tableSplit.getColumns().split(",");
         Schema schema = table.getSchema();
-        types = new Type[schema.getColumnCount()];
+//        types = new Type[schema.getColumnCount()];
+//        for (int i = 0; i < types.length; i++) {
+//            types[i] = schema.getColumnByIndex(i).getType();
+//            LOG.warn("Setting types array " + i + " to " + types[i].name());
+//        }
+        types = new Type[colArr.length];
         for (int i = 0; i < types.length; i++) {
-            types[i] = schema.getColumnByIndex(i).getType();
+            types[i] = schema.getColumn(colArr[i]).getType();
             LOG.warn("Setting types array " + i + " to " + types[i].name());
         }
         // Calling this now to set iterator.

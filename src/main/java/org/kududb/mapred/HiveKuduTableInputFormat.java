@@ -147,11 +147,16 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 		String columns = jobConf.get(ColumnProjectionUtils.READ_COLUMN_NAMES_CONF_STR);
 		String exprStr = jobConf.get(TableScanDesc.FILTER_EXPR_CONF_STR);
 
+		LOG.warn("input get columns: " + columns);
 		LOG.warn("input format get filter: " + exprStr);
 
 		if (StringUtils.isBlank(exprStr)) {
 			throw new IOException("kudu key condition must be defined");
 		}
+
+		// why exists empty columns name??
+		columns = columns.startsWith(",") ? columns.substring(1) : columns;
+		List<String> columnList = Arrays.asList(columns.split(","));
 
 		ExprNodeGenericFuncDesc filterExpr = Utilities.deserializeExpression(exprStr);
 		List<IndexSearchCondition> conditions = new ArrayList<IndexSearchCondition>();
@@ -164,13 +169,13 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 		}
 
 		List<KuduScanToken> tokens = new KuduPredicateBuilder().toPredicateScan(this.client.newScanTokenBuilder(table),
-				table, conditions);
+				table, columnList, conditions);
 
 		Path[] tablePaths = FileInputFormat.getInputPaths(jobConf);
 
 		KuduTableSplit[] splits = new KuduTableSplit[tokens.size()];
 		for (int j = 0; j < tokens.size(); ++j) {
-			splits[j] = new KuduTableSplit(tokens.get(j), tablePaths[0]);
+			splits[j] = new KuduTableSplit(tokens.get(j), tablePaths[0], columns);
 		}
 		return splits;
 	}

@@ -16,10 +16,12 @@
 
 package org.apache.hadoop.hive.kududb.KuduHandler;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.serde2.AbstractSerDe;
+import org.apache.hadoop.hive.serde2.ColumnProjectionUtils;
 import org.apache.hadoop.hive.serde2.SerDeException;
 import org.apache.hadoop.hive.serde2.SerDeStats;
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector;
@@ -29,10 +31,7 @@ import org.apache.hadoop.hive.serde2.objectinspector.StructObjectInspector;
 import org.apache.hadoop.io.Writable;
 import org.apache.kudu.Type;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Properties;
+import java.util.*;
 
 
 /**
@@ -69,14 +68,33 @@ public class HiveKuduSerDe extends AbstractSerDe {
             //This is where we will implement option to connect to Kudu and get the column list using Serde.
         }
 
-        List<String> columnNames = Arrays.asList(columnNameProperty.split(","));
-
-        String[] columnTypes = columnTypeProperty.split(":");
-
-        if (columnNames.size() != columnTypes.length) {
+        List<String> columnNamesTmp = Arrays.asList(columnNameProperty.split(","));
+        String[] columnTypesTmp = columnTypeProperty.split(":");
+        if (columnNamesTmp.size() != columnTypesTmp.length) {
             throw new SerDeException("Splitting column and types failed." + "columnNames: "
-                    + columnNames + ", columnTypes: "
-                    + Arrays.toString(columnTypes));
+                    + columnNamesTmp + ", columnTypes: "
+                    + Arrays.toString(columnTypesTmp));
+        }
+
+        List<String> columnNames = null;
+        String[] columnTypes = null;
+        String columns = sysConf.get(ColumnProjectionUtils.READ_COLUMN_NAMES_CONF_STR);
+        if (StringUtils.isNotBlank(columns)) {
+            Map<String, Integer> allColMap = new HashMap<>();
+            for (int i = 0; i < columnNamesTmp.size(); i++) {
+                allColMap.put(columnNamesTmp.get(i), i);
+            }
+
+            // why exists empty columns name??
+            columns = columns.startsWith(",") ? columns.substring(1) : columns;
+            columnNames = Arrays.asList(columns.split(","));
+            columnTypes = new String[columnNames.size()];
+            for (int i = 0; i < columnNames.size(); i++) {
+                columnTypes[i] = columnTypesTmp[allColMap.get(columnNames.get(i))];
+            }
+        } else {
+            columnNames = columnNamesTmp;
+            columnTypes = columnTypesTmp;
         }
 
         final Type[] types = new Type[columnTypes.length];
@@ -149,7 +167,7 @@ public class HiveKuduSerDe extends AbstractSerDe {
         }
         HiveKuduWritable tuple = (HiveKuduWritable) record;
         deserializeCache.clear();
-        for (int i = 0; i < fieldCount; i++) {
+        for (int i = 0; i < tuple.getColCount(); i++) {
             Object o = tuple.get(i);
             deserializeCache.add(o);
         }
