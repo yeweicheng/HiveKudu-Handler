@@ -264,8 +264,9 @@ public class KuduStorageHandler extends DefaultStorageHandler
         decomposedPredicate.pushedPredicate = analyzer.translateSearchConditions(conditions);
         decomposedPredicate.residualPredicate = residualPredicate;
 
-
-        LOG.warn("handler push filter: " + decomposedPredicate.pushedPredicate.getExprString());
+        if (decomposedPredicate.pushedPredicate != null) {
+            LOG.warn("handler push filter: " + decomposedPredicate.pushedPredicate.getExprString());
+        }
 
         return decomposedPredicate;
     }

@@ -32,7 +32,9 @@ public class KuduPredicateBuilder {
             throw new IOException("unsupported conditions, kudu key condition must be defined and only can use =,>=,>,<=,<");
         }
 
-        builder.setProjectedColumnNames(columnList);
+        if (columnList != null && columnList.size() > 0) {
+            builder.setProjectedColumnNames(columnList);
+        }
 
         Map<String, ColumnSchema> columnMap = new HashMap<>();
         List<ColumnSchema> columnSchemas = table.getSchema().getColumns();

@@ -75,6 +75,8 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 
 	static final String HIVE_QUERY_STRING = "hive.query.string";
 
+	static final String INGORE_PUSH_FILTER = "kudu.ingore.push.filter";
+
     /**
      * Job parameter that specifies the column projection as a comma-separated list of column names.
      *
@@ -144,32 +146,54 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 			throw new IOException("No table was provided");
 		}
 
+		boolean ingoreFilter = jobConf.getBoolean(INGORE_PUSH_FILTER, false);
+		if (ingoreFilter) {
+			LOG.info("ingore push filter enabled");
+		}
+
 		String columns = jobConf.get(ColumnProjectionUtils.READ_COLUMN_NAMES_CONF_STR);
 		String exprStr = jobConf.get(TableScanDesc.FILTER_EXPR_CONF_STR);
+
+		if (StringUtils.isBlank(columns)) {
+			columns = jobConf.get("columns");
+		}
 
 		LOG.warn("input get columns: " + columns);
 		LOG.warn("input format get filter: " + exprStr);
 
-		if (StringUtils.isBlank(exprStr)) {
-			throw new IOException("kudu key condition must be defined");
+//        LOG.warn("jobConf string: " + jobConf.toString());
+//		Iterator<Map.Entry<String, String>> keys = jobConf.iterator();
+//        while (keys.hasNext()) {
+//            Map.Entry<String, String> entry = keys.next();
+//            LOG.warn("jobConf " + entry.getKey() + ": " + entry.getValue());
+//        }
+
+
+		List<KuduScanToken> tokens = null;
+		if (!ingoreFilter) {
+			if (!ingoreFilter && StringUtils.isBlank(exprStr)) {
+				throw new IOException("kudu key condition must be defined");
+			}
+
+			// why exists empty columns name??
+			columns = columns.startsWith(",") ? columns.substring(1) : columns;
+			List<String> columnList = Arrays.asList(columns.split(","));
+
+			ExprNodeGenericFuncDesc filterExpr = Utilities.deserializeExpression(exprStr);
+			List<IndexSearchCondition> conditions = new ArrayList<IndexSearchCondition>();
+			IndexPredicateAnalyzer analyzer =
+					HiveKuduTableInputFormat.newIndexPredicateAnalyzer(table.getSchema().getColumns());
+			ExprNodeDesc residualPredicate = analyzer.analyzePredicate(filterExpr, conditions);
+
+			if (residualPredicate != null) {
+				LOG.warn("Ignoring residual predicate " + residualPredicate.getExprString());
+			}
+
+			tokens = new KuduPredicateBuilder().toPredicateScan(this.client.newScanTokenBuilder(table),
+					table, columnList, conditions);
+		} else {
+			tokens = this.client.newScanTokenBuilder(table).build();
 		}
-
-		// why exists empty columns name??
-		columns = columns.startsWith(",") ? columns.substring(1) : columns;
-		List<String> columnList = Arrays.asList(columns.split(","));
-
-		ExprNodeGenericFuncDesc filterExpr = Utilities.deserializeExpression(exprStr);
-		List<IndexSearchCondition> conditions = new ArrayList<IndexSearchCondition>();
-		IndexPredicateAnalyzer analyzer =
-				HiveKuduTableInputFormat.newIndexPredicateAnalyzer(table.getSchema().getColumns());
-		ExprNodeDesc residualPredicate = analyzer.analyzePredicate(filterExpr, conditions);
-
-		if (residualPredicate != null) {
-			LOG.warn("Ignoring residual predicate " + residualPredicate.getExprString());
-		}
-
-		List<KuduScanToken> tokens = new KuduPredicateBuilder().toPredicateScan(this.client.newScanTokenBuilder(table),
-				table, columnList, conditions);
 
 		Path[] tablePaths = FileInputFormat.getInputPaths(jobConf);
 
