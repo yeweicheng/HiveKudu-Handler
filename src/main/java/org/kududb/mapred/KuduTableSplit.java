@@ -5,6 +5,7 @@ import java.io.DataOutput;
 import java.io.IOException;
 
 import java.util.List;
+import java.util.Random;
 //import java.util.stream.Collectors;
 
 import org.apache.commons.logging.Log;
@@ -24,6 +25,8 @@ public class KuduTableSplit extends FileSplit implements InputSplit {
 	private String[] locations;
 	private String columns;
 
+	private static int oounter = 0;
+
 	/**
 	 * For Writable
 	 */
@@ -32,7 +35,7 @@ public class KuduTableSplit extends FileSplit implements InputSplit {
 	}
 
 	public KuduTableSplit(KuduScanToken scanToken, Path dummyPath, String columns) throws IOException {
-		super(dummyPath, 0, 0, (String[]) null);
+		super(dummyPath, (oounter++), (oounter++), (String[]) null);
 		LOG.warn("split fs path: " + super.toString());
 		scanTokenSerialized = scanToken.serialize();
 		// mark jdk 1.8
@@ -44,7 +47,7 @@ public class KuduTableSplit extends FileSplit implements InputSplit {
 			hosts[i] = replicas.get(i).getRpcHost();
 		}
 		locations = hosts;
-		this.columns = columns;
+		this.columns = columns == null ? "" : columns;
 	}
 
 	@Override
@@ -80,7 +83,7 @@ public class KuduTableSplit extends FileSplit implements InputSplit {
 	@Override
 	public long getLength() {
 		// TODO Auto-generated method stub
-		return 0;
+		return (oounter++);
 	}
 
 	@Override

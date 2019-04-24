@@ -134,12 +134,12 @@ public class KuduStorageHandler extends DefaultStorageHandler
 
         //This will always have the DB Name qualifier of Hive. Dont use this to set Kudu Tablename.
         String tblName = tableDesc.getTableName();
-        LOG.debug("Hive Table Name:" + tblName);
+        LOG.warn("Hive Table Name:" + tblName);
         Properties tblProps = tableDesc.getProperties();
         String columnNames = tblProps.getProperty(HiveKuduConstants.LIST_COLUMNS);
         String columnTypes = tblProps.getProperty(HiveKuduConstants.LIST_COLUMN_TYPES);
-        LOG.debug("Columns names:" + columnNames);
-        LOG.debug("Column types:" + columnTypes);
+        LOG.warn("Columns names:" + columnNames);
+        LOG.warn("Column types:" + columnTypes);
 
         if (columnNames.length() == 0) {
             //TODO: Place keeper to insert SerDeHelper code to connect to Kudu to extract column names.
@@ -154,8 +154,8 @@ public class KuduStorageHandler extends DefaultStorageHandler
         jobProperties.put(HiveKuduConstants.MR_MASTER_ADDRESS_NAME,
                 tblProps.getProperty(HiveKuduConstants.MASTER_ADDRESS_NAME));
 
-        LOG.debug("Kudu Table Name: " + tblProps.getProperty(HiveKuduConstants.TABLE_NAME));
-        LOG.debug("Kudu Master Addresses: " + tblProps.getProperty(HiveKuduConstants.MASTER_ADDRESS_NAME));
+        LOG.warn("Kudu Table Name: " + tblProps.getProperty(HiveKuduConstants.TABLE_NAME));
+        LOG.warn("Kudu Master Addresses: " + tblProps.getProperty(HiveKuduConstants.MASTER_ADDRESS_NAME));
 
 
         //set configuration property
@@ -172,6 +172,12 @@ public class KuduStorageHandler extends DefaultStorageHandler
                 tblProps.getProperty(HiveKuduConstants.KEY_COLUMNS));
         conf.set(HiveKuduConstants.MASTER_ADDRESS_NAME,
                 tblProps.getProperty(HiveKuduConstants.MASTER_ADDRESS_NAME));
+        if (conf.get(HiveKuduConstants.INSIDE_PUSH_FILTER) == null) {
+            conf.set(HiveKuduConstants.INSIDE_PUSH_FILTER, "*");
+        }
+        if (conf.get(HiveKuduConstants.ONLY_KUDU_TABLE) == null) {
+            conf.set(HiveKuduConstants.ONLY_KUDU_TABLE, "true");
+        }
 
         //set class variables
         kuduMaster = conf.get(HiveKuduConstants.MASTER_ADDRESS_NAME);

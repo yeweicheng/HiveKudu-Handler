@@ -1,5 +1,6 @@
 package org.kududb.mapred;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hive.kududb.KuduHandler.HiveKuduWritable;
@@ -22,33 +23,32 @@ public class KuduTableRecordReader implements RecordReader<NullWritable, HiveKud
     private RowResult currentValue;
     private RowResultIterator iterator;
     private KuduScanner scanner;
-    private KuduTableSplit tableSplit;
     private Type[] types;
-    private KuduClient client;
-    private boolean first = true;
     private long rowCount;
     private static final int ROW_COUNT_FLAG_TIME = 60000;
 
     public KuduTableRecordReader(KuduTableSplit tableSplit, KuduClient client, KuduTable table) throws IOException, InterruptedException {
         LOG.warn("I was called : TableRecordReader");
 
-        this.tableSplit = tableSplit;
-        this.client = client;
-
         scanner = KuduScanToken.deserializeIntoScanner(tableSplit.getScanTokenSerialized(), client);
 
         String[] colArr = tableSplit.getColumns().split(",");
         Schema schema = table.getSchema();
-//        types = new Type[schema.getColumnCount()];
-//        for (int i = 0; i < types.length; i++) {
-//            types[i] = schema.getColumnByIndex(i).getType();
-//            LOG.warn("Setting types array " + i + " to " + types[i].name());
-//        }
-        types = new Type[colArr.length];
-        for (int i = 0; i < types.length; i++) {
-            types[i] = schema.getColumn(colArr[i]).getType();
-            LOG.warn("Setting types array " + i + " to " + types[i].name());
+
+        if (StringUtils.isNotBlank(tableSplit.getColumns())) {
+            types = new Type[colArr.length];
+            for (int i = 0; i < types.length; i++) {
+                types[i] = schema.getColumn(colArr[i]).getType();
+                LOG.warn("Setting types array " + i + " to " + types[i].name());
+            }
+        } else {
+            types = new Type[schema.getColumnCount()];
+            for (int i = 0; i < types.length; i++) {
+                types[i] = schema.getColumnByIndex(i).getType();
+                LOG.warn("Setting types array " + i + " to " + types[i].name());
+            }
         }
+
         // Calling this now to set iterator.
         tryRefreshIterator();
         rowCount = 0L;

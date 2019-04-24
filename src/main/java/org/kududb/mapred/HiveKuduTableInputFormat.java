@@ -5,6 +5,7 @@ package org.kududb.mapred;
  */
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hive.kududb.KuduHandler.HiveKuduConstants;
 import org.apache.hadoop.hive.kududb.KuduHandler.HiveKuduWritable;
 
 import org.apache.hadoop.hive.ql.exec.Utilities;
@@ -48,7 +49,7 @@ import java.util.*;
  * the object won't be used again and the AsyncKuduClient is shut down.
  * </p>
  */
-public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveKuduWritable> {
+public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveKuduWritable>, Configurable {
 
     private static final Log LOG = LogFactory.getLog(HiveKuduTableInputFormat.class);
 
@@ -75,8 +76,6 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 
 	static final String HIVE_QUERY_STRING = "hive.query.string";
 
-	static final String INGORE_PUSH_FILTER = "kudu.ingore.push.filter";
-
     /**
      * Job parameter that specifies the column projection as a comma-separated list of column names.
      *
@@ -95,13 +94,14 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 
 	private static final Object kuduTableMonitor = new Object();
 
-    private Configuration conf;
-    private KuduClient client;
-    private KuduTable table;
+    private Map<String, Configuration> confMap = new HashMap<>();
+    private Map<String, KuduClient> clientMap = new HashMap<>();
+    private Map<String, KuduTable> tableMap = new HashMap<>();
     private long operationTimeoutMs;
     private String nameServer;
     private boolean cacheBlocks;
     private String kuduMasterAddress;
+    private String tableName;
 
     private KuduClient makeKuduClient() {
     	return new KuduClient.KuduClientBuilder(this.kuduMasterAddress)
@@ -109,9 +109,9 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
                 .build();
     }
 
-    private void initParam(JobConf jobConf) {
-		if (table == null) {
-			String tableName = jobConf.get(INPUT_TABLE_KEY);
+    private KuduTable initParam(JobConf jobConf) {
+		tableName = jobConf.get(INPUT_TABLE_KEY);
+		if (!tableMap.containsKey(tableName)) {
 			this.kuduMasterAddress = jobConf.get(MASTER_ADDRESSES_KEY);
 			this.operationTimeoutMs = jobConf.getLong(OPERATION_TIMEOUT_MS_KEY,
 					AsyncKuduClient.DEFAULT_OPERATION_TIMEOUT_MS);
@@ -120,15 +120,18 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 
 			LOG.warn(" the master address here is " + this.kuduMasterAddress);
 
-			this.client = this.makeKuduClient();
+			KuduClient client = this.makeKuduClient();
 			try {
-				this.table = client.openTable(tableName);
+				KuduTable table = client.openTable(tableName);
+				tableMap.put(tableName, table);
+				clientMap.put(tableName, client);
 			} catch (Exception ex) {
 				throw new RuntimeException("Could not obtain the table from the master, " +
 						"is the master running and is this table created? tablename=" + tableName + " and " +
 						"master address= " + this.kuduMasterAddress, ex);
 			}
 		}
+		return tableMap.get(tableName);
 	}
 
     @Override
@@ -141,25 +144,48 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 
 	public InputSplit[] getSplitsInternal(JobConf jobConf, int i)
 			throws IOException {
-		initParam(jobConf);
+		LOG.warn("I was called : getSplitsInternal");
+		KuduTable table = initParam(jobConf);
 		if (table == null) {
 			throw new IOException("No table was provided");
 		}
 
-		boolean ingoreFilter = jobConf.getBoolean(INGORE_PUSH_FILTER, false);
-		if (ingoreFilter) {
-			LOG.info("ingore push filter enabled");
+		boolean ignoreFilter = jobConf.getBoolean(HiveKuduConstants.IGNORE_PUSH_FILTER, false);
+		if (ignoreFilter) {
+			LOG.info("ignore push filter enabled");
 		}
 
 		String columns = jobConf.get(ColumnProjectionUtils.READ_COLUMN_NAMES_CONF_STR);
-		String exprStr = jobConf.get(TableScanDesc.FILTER_EXPR_CONF_STR);
+		String columnsInside = jobConf.get(HiveKuduConstants.INSIDE_PUSH_FILTER);
+		String columnsInsideTable = jobConf.get(HiveKuduConstants.INSIDE_PUSH_FILTER + "." + tableName);
+		LOG.warn(ColumnProjectionUtils.READ_COLUMN_NAMES_CONF_STR + ": " + columns);
+		LOG.warn(HiveKuduConstants.INSIDE_PUSH_FILTER + ": " + columnsInside);
+		LOG.warn(HiveKuduConstants.INSIDE_PUSH_FILTER + "." + tableName + ": " + columnsInsideTable);
 
-		if (StringUtils.isBlank(columns)) {
-			columns = jobConf.get("columns");
+		if (StringUtils.isBlank(columns) && !"*".equals(columnsInside)) {
+			columns = columnsInside;
 		}
 
-		LOG.warn("input get columns: " + columns);
+		if (StringUtils.isNotBlank(columnsInsideTable)) {
+			columns = columnsInsideTable;
+		}
+
+		List<String> columnList = null;
+		String onlyKuduTable = jobConf.get(HiveKuduConstants.ONLY_KUDU_TABLE, "true");
+		if ("true".equals(onlyKuduTable)) {
+			if (StringUtils.isNotBlank(columns) && !(columns.startsWith("_col") || columns.startsWith(",_col"))) {
+				columns = fixColumns(columns);
+
+				columnList = Arrays.asList(columns.split(","));
+				LOG.warn("input get columns: " + columns);
+			}
+		} else {
+			columns = null;
+		}
+
+		String exprStr = jobConf.get(TableScanDesc.FILTER_EXPR_CONF_STR);
 		LOG.warn("input format get filter: " + exprStr);
+
 
 //        LOG.warn("jobConf string: " + jobConf.toString());
 //		Iterator<Map.Entry<String, String>> keys = jobConf.iterator();
@@ -168,16 +194,11 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 //            LOG.warn("jobConf " + entry.getKey() + ": " + entry.getValue());
 //        }
 
-
 		List<KuduScanToken> tokens = null;
-		if (!ingoreFilter) {
-			if (!ingoreFilter && StringUtils.isBlank(exprStr)) {
-				throw new IOException("kudu key condition must be defined");
+		if (!ignoreFilter) {
+			if (!ignoreFilter && StringUtils.isBlank(exprStr)) {
+				throw new IOException("kudu key condition must be defined, only support use =,>=,>,<=,<");
 			}
-
-			// why exists empty columns name??
-			columns = columns.startsWith(",") ? columns.substring(1) : columns;
-			List<String> columnList = Arrays.asList(columns.split(","));
 
 			ExprNodeGenericFuncDesc filterExpr = Utilities.deserializeExpression(exprStr);
 			List<IndexSearchCondition> conditions = new ArrayList<IndexSearchCondition>();
@@ -189,10 +210,11 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 				LOG.warn("Ignoring residual predicate " + residualPredicate.getExprString());
 			}
 
-			tokens = new KuduPredicateBuilder().toPredicateScan(this.client.newScanTokenBuilder(table),
+			tokens = new KuduPredicateBuilder().toPredicateScan(clientMap.get(tableName).newScanTokenBuilder(table),
 					table, columnList, conditions);
 		} else {
-			tokens = this.client.newScanTokenBuilder(table).build();
+			columns = null;
+			tokens = clientMap.get(tableName).newScanTokenBuilder(table).build();
 		}
 
 		Path[] tablePaths = FileInputFormat.getInputPaths(jobConf);
@@ -204,7 +226,15 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 		return splits;
 	}
 
-    /**
+	private String fixColumns(String columns) {
+		// why exists empty columns name??
+		columns = columns.replace(",BLOCK__OFFSET__INSIDE__FILE", "")
+				.replace(",INPUT__FILE__NAME", "").replace(",ROW__ID", "");
+		columns = columns.startsWith(",") ? columns.substring(1) : columns;
+		return columns;
+	}
+
+	/**
      * This method might seem alien, but we do this in order to resolve the hostnames the same way
      * Hadoop does. This ensures we get locality if Kudu is running along MR/YARN.
      * @param host hostname we got from the master
@@ -240,36 +270,24 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 		KuduTableSplit tableSplit = (KuduTableSplit) inputSplit;
 		LOG.warn("I was called : getRecordReader");
 		try {
-			initParam(jobConf);
-			return new KuduTableRecordReader(tableSplit, this.makeKuduClient(), this.table);
+			KuduTable table = initParam(jobConf);
+			return new KuduTableRecordReader(tableSplit, this.makeKuduClient(), table);
 		} catch (Exception e) {
 			throw new IOException(e);
 		}
 	}
 
-//    @Override
+    @Override
     public void setConf(Configuration entries) {
     	LOG.warn("I was called : setConf");
-        this.conf = new Configuration(entries);
+        Configuration conf = entries;
 
-        String tableName = conf.get(INPUT_TABLE_KEY);
-        this.kuduMasterAddress = conf.get(MASTER_ADDRESSES_KEY);
-        this.operationTimeoutMs = conf.getLong(OPERATION_TIMEOUT_MS_KEY,
-                AsyncKuduClient.DEFAULT_OPERATION_TIMEOUT_MS);
-        this.nameServer = conf.get(NAME_SERVER_KEY);
-        this.cacheBlocks = conf.getBoolean(SCAN_CACHE_BLOCKS, false);
-
-        LOG.warn(" the master address here is " + this.kuduMasterAddress);
-
-        this.client = this.makeKuduClient();
-        try {
-            this.table = client.openTable(tableName);
-        } catch (Exception ex) {
-            throw new RuntimeException("Could not obtain the table from the master, " +
-                    "is the master running and is this table created? tablename=" + tableName + " and " +
-                    "master address= " + this.kuduMasterAddress, ex);
-        }
-
+        // some not kudu table also use HiveKuduSerDe
+		conf.set(HiveKuduConstants.IS_KUDU_TABLE, "true");
+		if (StringUtils.isBlank(tableName)) {
+			tableName = conf.get(INPUT_TABLE_KEY);
+		}
+		confMap.put(tableName, conf);
 	}
 
     /**
@@ -289,9 +307,10 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
         return r;
     }
 
-//    @Override
+    @Override
     public Configuration getConf() {
-        return conf;
+		LOG.warn("I was called : getConf");
+        return confMap.get(tableName);
     }
 
 	/**

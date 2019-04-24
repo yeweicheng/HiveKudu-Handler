@@ -42,6 +42,10 @@ public final class HiveKuduConstants {
     public static final String MR_PROPERTY_PREFIX = "kudu.mapreduce.";
     //DEFAULT VALUES & Getters for Default values
 
+    public static final String IGNORE_PUSH_FILTER = "kudu.ignore.push.filter";
+    public static final String INSIDE_PUSH_FILTER = "kudu.inside.push.filter";
+    public static final String ONLY_KUDU_TABLE = "kudu.only.kudu.table";
+    public static final String IS_KUDU_TABLE = "kudu.is.kudu.table";
 
     private HiveKuduConstants() {
     }

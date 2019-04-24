@@ -30,6 +30,7 @@ import org.apache.hadoop.hive.serde2.objectinspector.StructField;
 import org.apache.hadoop.hive.serde2.objectinspector.StructObjectInspector;
 import org.apache.hadoop.io.Writable;
 import org.apache.kudu.Type;
+import org.kududb.mapred.HiveKuduTableInputFormat;
 
 import java.util.*;
 
@@ -43,25 +44,27 @@ public class HiveKuduSerDe extends AbstractSerDe {
     private static final Log LOG = LogFactory.getLog(HiveKuduSerDe.class);
 
     private HiveKuduWritable cachedWritable; //Currently Update/Delete not supported from Hive.
-
-    private int fieldCount;
-
     private StructObjectInspector objectInspector;
     private List<Object> deserializeCache;
+    private int fieldCount;
 
     public HiveKuduSerDe() {
     }
 
     @Override
     public void initialize(Configuration sysConf, Properties tblProps)
-        throws SerDeException {
-
+            throws SerDeException {
         LOG.debug("tblProps: " + tblProps);
 
+        String tableName = sysConf.get(HiveKuduConstants.TABLE_NAME);
         String columnNameProperty = tblProps
                 .getProperty(HiveKuduConstants.LIST_COLUMNS);
         String columnTypeProperty = tblProps
                 .getProperty(HiveKuduConstants.LIST_COLUMN_TYPES);
+
+        LOG.warn(HiveKuduConstants.LIST_COLUMNS + ": " + columnNameProperty);
+        LOG.warn(HiveKuduConstants.LIST_COLUMN_TYPES + ": " + columnTypeProperty);
+
 
         if (columnNameProperty.length() == 0
                 && columnTypeProperty.length() == 0) {
@@ -76,23 +79,69 @@ public class HiveKuduSerDe extends AbstractSerDe {
                     + Arrays.toString(columnTypesTmp));
         }
 
-        List<String> columnNames = null;
-        String[] columnTypes = null;
+        // DEBUG
+//        Iterator<Map.Entry<String, String>> iterator = sysConf.iterator();
+//        while (iterator.hasNext()) {
+//            Map.Entry<String, String> e = iterator.next();
+//            LOG.warn(e.getKey() + " -> " + e.getValue());
+//        }
+
+        boolean ignoreFilter = sysConf.getBoolean(HiveKuduConstants.IGNORE_PUSH_FILTER, false);
+        if (ignoreFilter) {
+            LOG.warn("ignore push filter enabled");
+        }
+
         String columns = sysConf.get(ColumnProjectionUtils.READ_COLUMN_NAMES_CONF_STR);
-        if (StringUtils.isNotBlank(columns)) {
+        String columnsInside = sysConf.get(HiveKuduConstants.INSIDE_PUSH_FILTER);
+        String columnsInsideTable = sysConf.get(HiveKuduConstants.INSIDE_PUSH_FILTER + "." + tableName);
+        String onlyKuduTable = sysConf.get(HiveKuduConstants.ONLY_KUDU_TABLE);
+        String isKuduTable = sysConf.get(HiveKuduConstants.IS_KUDU_TABLE);
+//        LOG.warn(HiveKuduConstants.ONLY_KUDU_TABLE + ": " + onlyKuduTable);
+//        LOG.warn(HiveKuduConstants.IS_KUDU_TABLE + ": " + isKuduTable);
+        LOG.warn(ColumnProjectionUtils.READ_COLUMN_NAMES_CONF_STR + ": " + columns);
+//        LOG.warn(HiveKuduConstants.INSIDE_PUSH_FILTER + ": " + columnsInside);
+//        LOG.warn(HiveKuduConstants.INSIDE_PUSH_FILTER + "." + tableName + ": " + columnsInsideTable);
+//
+//        if (StringUtils.isNotBlank(columnsInside) && !"*".equals(columnsInside) && !"true".equals(onlyKuduTable)) {
+//            columns = columnsInside;
+//        } else if (StringUtils.isNotBlank(columnsInsideTable) && !"*".equals(columnsInsideTable) && !"true".equals(onlyKuduTable)) {
+//            columns = columnsInsideTable;
+//        } else if (!"true".equals(onlyKuduTable)) {
+//            columns = null;
+//        }
+
+        if (!"true".equals(onlyKuduTable)) {
+            columns = null;
+        }
+
+        if (StringUtils.isNotBlank(columns) && (columns.startsWith("_col") || columns.startsWith(",_col"))) {
+            columns = null;
+        }
+
+        List<String> columnNames;
+        String[] columnTypes;
+        if (!ignoreFilter && StringUtils.isNotBlank(columns)) {
             Map<String, Integer> allColMap = new HashMap<>();
             for (int i = 0; i < columnNamesTmp.size(); i++) {
                 allColMap.put(columnNamesTmp.get(i), i);
             }
 
-            // why exists empty columns name??
-            columns = columns.startsWith(",") ? columns.substring(1) : columns;
-            columnNames = Arrays.asList(columns.split(","));
+            LOG.warn("filter columns: " + columns);
+            List<String> filterColumn = Arrays.asList(columns.split(","));
+
+            columnNames = new ArrayList<>();
+            for (int i = 0; i < filterColumn.size(); i++) {
+                if (allColMap.containsKey(filterColumn.get(i))) {
+                    columnNames.add(filterColumn.get(i));
+                }
+            }
+
             columnTypes = new String[columnNames.size()];
             for (int i = 0; i < columnNames.size(); i++) {
                 columnTypes[i] = columnTypesTmp[allColMap.get(columnNames.get(i))];
             }
         } else {
+            LOG.warn("use all columns ");
             columnNames = columnNamesTmp;
             columnTypes = columnTypesTmp;
         }
@@ -132,10 +181,11 @@ public class HiveKuduSerDe extends AbstractSerDe {
 
     @Override
     public HiveKuduWritable serialize(Object row, ObjectInspector inspector)
-        throws SerDeException {
+            throws SerDeException {
 
         final StructObjectInspector structInspector = (StructObjectInspector) inspector;
         final List<? extends StructField> fields = structInspector.getAllStructFieldRefs();
+
         if (fields.size() != fieldCount) {
             throw new SerDeException(String.format(
                     "Required %d columns, received %d.", fieldCount,
@@ -143,9 +193,16 @@ public class HiveKuduSerDe extends AbstractSerDe {
         }
 
         cachedWritable.clear();
+        StructField structField;
+//        Map<String, StructField> fieldMap = new HashMap<>(fields.size());
+//        for (int i = 0; i < fields.size(); i++) {
+//            structField = fields.get(i);
+//            fieldMap.put(structField.getFieldName(), structField);
+//        }
 
         for (int i = 0; i < fieldCount; i++) {
-            StructField structField = fields.get(i);
+            structField = fields.get(i);
+//            structField = fieldMap.get(columnNames.get(i));
             if (structField != null) {
                 Object field = structInspector.getStructFieldData(row,
                         structField);

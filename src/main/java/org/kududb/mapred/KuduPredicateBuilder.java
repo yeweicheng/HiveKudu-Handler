@@ -28,12 +28,13 @@ public class KuduPredicateBuilder {
                                                List<String> columnList,
                                                List<IndexSearchCondition> conditions) throws IOException {
 
-        if (conditions == null || conditions.isEmpty()) {
-            throw new IOException("unsupported conditions, kudu key condition must be defined and only can use =,>=,>,<=,<");
-        }
-
         if (columnList != null && columnList.size() > 0) {
             builder.setProjectedColumnNames(columnList);
+        }
+
+        if (conditions == null || conditions.isEmpty()) {
+//            throw new IOException("unsupported conditions, kudu key condition must be defined and only can use =,>=,>,<=,<");
+            return builder.build();
         }
 
         Map<String, ColumnSchema> columnMap = new HashMap<>();
