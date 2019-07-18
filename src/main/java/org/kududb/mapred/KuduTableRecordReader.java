@@ -31,6 +31,7 @@ public class KuduTableRecordReader implements RecordReader<NullWritable, HiveKud
         LOG.warn("I was called : TableRecordReader");
 
         scanner = KuduScanToken.deserializeIntoScanner(tableSplit.getScanTokenSerialized(), client);
+        LOG.warn("scanner timeout -> " + scanner.getScanRequestTimeout());
 
         String[] colArr = tableSplit.getColumns().split(",");
         Schema schema = table.getSchema();

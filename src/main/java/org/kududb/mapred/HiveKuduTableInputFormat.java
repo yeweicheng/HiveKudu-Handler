@@ -86,6 +86,8 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
      */
     static final String COLUMN_PROJECTION_KEY = "kudu.mapreduce.column.projection";
 
+	static final String KUDU_SCAN_TIMEOUT = "kudu.scan.timeout";
+
     /**
      * The reverse DNS lookup cache mapping: address from Kudu => hostname for Hadoop. This cache is
      * used in order to not do DNS lookups multiple times for each tablet server.
@@ -106,6 +108,7 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
     private KuduClient makeKuduClient() {
     	return new KuduClient.KuduClientBuilder(this.kuduMasterAddress)
                 .defaultOperationTimeoutMs(operationTimeoutMs)
+				.defaultSocketReadTimeoutMs(operationTimeoutMs)
                 .build();
     }
 
@@ -195,6 +198,10 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 //        }
 
 		List<KuduScanToken> tokens = null;
+		KuduScanToken.KuduScanTokenBuilder builder = clientMap.get(tableName).newScanTokenBuilder(table);
+		long timeout = jobConf.getLong(KUDU_SCAN_TIMEOUT, 60000);
+		builder.setTimeout(timeout);
+		builder.scanRequestTimeout(timeout);
 		if (!ignoreFilter) {
 			if (!ignoreFilter && StringUtils.isBlank(exprStr)) {
 				throw new IOException("kudu key condition must be defined, only support use =,>=,>,<=,<");
@@ -210,11 +217,10 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 				LOG.warn("Ignoring residual predicate " + residualPredicate.getExprString());
 			}
 
-			tokens = new KuduPredicateBuilder().toPredicateScan(clientMap.get(tableName).newScanTokenBuilder(table),
-					table, columnList, conditions);
+			tokens = new KuduPredicateBuilder().toPredicateScan(builder, table, columnList, conditions);
 		} else {
 			columns = null;
-			tokens = clientMap.get(tableName).newScanTokenBuilder(table).build();
+			tokens = builder.build();
 		}
 
 		Path[] tablePaths = FileInputFormat.getInputPaths(jobConf);
