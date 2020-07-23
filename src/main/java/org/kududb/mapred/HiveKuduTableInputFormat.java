@@ -202,6 +202,7 @@ public class HiveKuduTableInputFormat implements InputFormat<NullWritable, HiveK
 		long timeout = jobConf.getLong(KUDU_SCAN_TIMEOUT, 60000);
 		builder.setTimeout(timeout);
 		builder.scanRequestTimeout(timeout);
+		builder.replicaSelection(ReplicaSelection.CLOSEST_REPLICA);
 		if (!ignoreFilter) {
 			if (!ignoreFilter && StringUtils.isBlank(exprStr)) {
 				throw new IOException("kudu key condition must be defined, only support use =,>=,>,<=,<");

@@ -27,8 +27,10 @@ public class KuduTableRecordReader implements RecordReader<NullWritable, HiveKud
     private long rowCount;
     private static final int ROW_COUNT_FLAG_TIME = 60000;
 
+    private boolean closed = false;
+
     public KuduTableRecordReader(KuduTableSplit tableSplit, KuduClient client, KuduTable table) throws IOException, InterruptedException {
-        LOG.warn("I was called : TableRecordReader");
+        LOG.warn("I was called : TableRecordReader-new");
 
         scanner = KuduScanToken.deserializeIntoScanner(tableSplit.getScanTokenSerialized(), client);
         LOG.warn("scanner timeout -> " + scanner.getScanRequestTimeout());
@@ -66,6 +68,9 @@ public class KuduTableRecordReader implements RecordReader<NullWritable, HiveKud
             if (!iterator.hasNext()) {
                 // Means we still have the same iterator, we're done
                 LOG.info("all line size : " + rowCount);
+                if (!closed) {
+                    throw new IOException("hey! Reader not close yet!");
+                }
                 return false;
             }
         }
@@ -192,6 +197,7 @@ public class KuduTableRecordReader implements RecordReader<NullWritable, HiveKud
             if (!scanner.isClosed()) {
                 scanner.close();
             }
+            this.closed = true;
         } catch (NullPointerException npe) {
             LOG.warn("The scanner is supposed to be open but its not. TODO: Fix me.");
         } catch (Exception e) {
